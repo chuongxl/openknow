@@ -1,0 +1,2 @@
+[console_scripts]
+openknow = openknow.cli:main
