@@ -7,19 +7,6 @@ from pathlib import Path
 # Default config directory in user's home
 DEFAULT_CONFIG_DIR = Path.home() / ".openknow"
 
-# Azure AD application settings for Microsoft Graph API
-# Users register a free Azure AD app to get these values
-DEFAULT_CLIENT_ID = ""
-DEFAULT_TENANT_ID = "common"  # supports personal and work accounts
-
-# Microsoft Graph API scopes needed for OneDrive/SharePoint access
-GRAPH_SCOPES = [
-    "Files.Read",
-    "Files.Read.All",
-    "Sites.Read.All",
-    "offline_access",
-]
-
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 
@@ -42,28 +29,47 @@ def get_download_dir() -> Path:
     return download_dir
 
 
-def load_auth_config() -> dict:
-    """Load Azure AD application configuration from config file or environment."""
-    config_file = get_config_dir() / "auth.json"
-    config = {
-        "client_id": os.environ.get("OPENKNOW_CLIENT_ID", DEFAULT_CLIENT_ID),
-        "tenant_id": os.environ.get("OPENKNOW_TENANT_ID", DEFAULT_TENANT_ID),
-    }
+def get_credentials_path() -> Path:
+    """Return the path to the stored credentials file."""
+    return get_config_dir() / "credentials.json"
 
-    if config_file.exists():
+
+def save_credentials(username: str, password: str) -> None:
+    """Persist Microsoft 365 credentials to disk (mode 600).
+
+    Args:
+        username: Microsoft 365 username (e.g. user@company.com).
+        password: Microsoft 365 account password.
+    """
+    creds_file = get_credentials_path()
+    with open(creds_file, "w") as f:
+        json.dump({"username": username, "password": password}, f, indent=2)
+    os.chmod(creds_file, 0o600)
+
+
+def load_credentials() -> dict:
+    """Load Microsoft 365 credentials from environment or config file.
+
+    Environment variables ``OPENKNOW_USERNAME`` and ``OPENKNOW_PASSWORD``
+    take precedence over the stored credentials file.
+
+    Returns:
+        Dict with keys ``username`` and ``password`` (both may be empty strings).
+    """
+    creds = {
+        "username": os.environ.get("OPENKNOW_USERNAME", ""),
+        "password": os.environ.get("OPENKNOW_PASSWORD", ""),
+    }
+    creds_file = get_credentials_path()
+    if creds_file.exists():
         try:
-            with open(config_file) as f:
-                file_config = json.load(f)
-            config.update(file_config)
+            with open(creds_file) as f:
+                stored = json.load(f)
+            # env vars override file values
+            if not creds["username"]:
+                creds["username"] = stored.get("username", "")
+            if not creds["password"]:
+                creds["password"] = stored.get("password", "")
         except (json.JSONDecodeError, OSError):
             pass
-
-    return config
-
-
-def save_auth_config(client_id: str, tenant_id: str = DEFAULT_TENANT_ID) -> None:
-    """Save Azure AD application configuration to config file."""
-    config_file = get_config_dir() / "auth.json"
-    config = {"client_id": client_id, "tenant_id": tenant_id}
-    with open(config_file, "w") as f:
-        json.dump(config, f, indent=2)
+    return creds

@@ -1,6 +1,6 @@
 # openknow
 
-A local agent that automatically accesses knowledge via OneDrive shared folders and SharePoint sites, downloads files to your machine, and integrates with the opencode CLI.
+A local agent that automatically accesses knowledge via OneDrive shared folders and SharePoint sites, downloads files to your machine, and provides a ChatGPT-style web UI for asking questions about the content.
 
 ---
 
@@ -8,21 +8,19 @@ A local agent that automatically accesses knowledge via OneDrive shared folders 
 
 | Factor | OpenHands (Python agent) | Microsoft Power Apps / Power Automate |
 |---|---|---|
-| **Cost** | Free (open-source + free Azure AD app registration) | Requires Microsoft 365 / Power Apps per-user or per-app plan (~$5–$20/user/month) |
+| **Cost** | Free (open-source, no licensing) | Requires Microsoft 365 / Power Apps plan (~$5–$20/user/month) |
 | **Local execution** | Runs entirely on local computer | Cloud-first; local agent requires a gateway |
 | **opencode CLI integration** | Native Python CLI, integrates directly | Requires custom connectors or webhooks |
-| **OneDrive/SharePoint access** | Microsoft Graph API (free, no extra licensing) | Native connectors (premium connectors add cost) |
-| **Setup complexity** | Moderate (Azure AD app registration needed once) | Low (drag-and-drop) but requires M365 admin access |
-| **Customisation** | Full control over logic and data handling | Limited to available connectors and flow steps |
+| **Authentication** | Microsoft 365 username + password | Native connectors (premium connectors add cost) |
 | **Data privacy** | Files stay on local machine | Files flow through Microsoft cloud services |
+| **Setup complexity** | Minimal — just run `openknow configure` | Requires M365 admin access |
 
 **Decision: Python-based local agent (this project)**
 
-For a local computer agent that integrates with the opencode CLI, the Python approach is chosen because:
-1. **Zero operational cost** – Microsoft Graph API is free; no per-user licensing.
-2. **Local-first** – files are downloaded and processed entirely on your machine.
-3. **Full CLI integration** – native Click CLI works seamlessly with opencode workflows.
-4. **No vendor lock-in** – open-source, auditable, and fully customisable.
+- **Zero operational cost** – no per-user licensing required
+- **Local-first** – files stay on your machine, no cloud intermediaries
+- **Native opencode integration** – automatically indexes downloaded files for AI-powered Q&A
+- **Simple auth** – uses your existing Microsoft 365 username and password
 
 ---
 
@@ -33,16 +31,22 @@ For a local computer agent that integrates with the opencode CLI, the Python app
 - 📂 **Folder scanning** – list all files in a shared folder without downloading
 - ⬇️ **File sync** – download files from OneDrive/SharePoint to local storage
 - 🔍 **File filtering** – filter by pattern (e.g. `*.pdf`, `*report*`)
-- 🔄 **Token caching** – MSAL token cache avoids re-authentication on every run
-- 🖥 **opencode CLI compatible** – runs as a standard CLI tool
+- 🤖 **opencode integration** – downloaded files are automatically indexed by opencode for AI-powered answers
+- 💬 **Chat web UI** – ask questions about your knowledge base via a ChatGPT-style browser interface
+
+---
+
+## Chat UI
+
+![OpenKnow Chat UI](https://github.com/user-attachments/assets/cf119ac6-b582-45db-a66a-d394e8a2dd0d)
 
 ---
 
 ## Prerequisites
 
 - Python 3.9+
-- A Microsoft account (personal, work, or school)
-- An Azure AD app registration (free) – see [Setup](#setup)
+- A Microsoft 365 account (personal, work, or school) with access to the OneDrive/SharePoint links
+- [opencode](https://opencode.ai) installed locally (optional — required for AI-powered answers)
 
 ---
 
@@ -56,53 +60,28 @@ pip install -e .
 
 ---
 
-## Setup
-
-### 1. Register an Azure AD Application (one-time)
-
-1. Go to [Azure Portal → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
-2. Click **New registration**
-3. Set **Name** (e.g. `openknow`)
-4. Under **Supported account types**, choose:
-   - *Accounts in any organizational directory and personal Microsoft accounts* (for both OneDrive personal and SharePoint work accounts)
-5. Set **Redirect URI** → **Public client/native** → `http://localhost`
-6. Click **Register**
-7. Go to **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated**:
-   - `Files.Read`
-   - `Files.Read.All`
-   - `Sites.Read.All`
-   - `offline_access`
-8. Copy the **Application (client) ID**
-
-### 2. Configure openknow
-
-```bash
-openknow configure
-# Enter your Application (client) ID when prompted
-```
-
-Configuration is stored in `~/.openknow/auth.json`.
-
----
-
 ## Quick Start
 
 ```bash
-# 1. Create a workspace
+# 1. Store your Microsoft 365 credentials (saved locally, mode 600)
+openknow configure
+
+# 2. Create a workspace
 openknow workspace create research --description "AI research papers"
 
-# 2. Add OneDrive or SharePoint links (up to 5 per workspace)
+# 3. Add OneDrive or SharePoint links (up to 5 per workspace)
 openknow link add research https://1drv.ms/f/s!AbCdEfGhIjKlMnOp
-openknow link add research https://company.sharepoint.com/sites/AITeam/Shared%20Documents --label "Team Docs"
+openknow link add research https://company.sharepoint.com/sites/AITeam --label "Team Docs"
 
-# 3. Scan to see what files are available (no download)
+# 4. Scan to see what files are available (no download)
 openknow scan research
 
-# 4. Sync (download) all files locally
+# 5. Download all files (also indexes them with opencode if installed)
 openknow sync research
 
-# 5. View downloaded files
-openknow files research
+# 6. Launch the chat UI and ask questions
+openknow ui
+# Then open http://127.0.0.1:5000 in your browser
 ```
 
 ---
@@ -110,15 +89,21 @@ openknow files research
 ## Commands
 
 ### `openknow configure`
-Set up Azure AD credentials for Microsoft Graph API.
+Store Microsoft 365 credentials for OneDrive/SharePoint access. No Azure AD app registration required.
 
 ```bash
-openknow configure --client-id <YOUR_CLIENT_ID> --tenant-id common
+openknow configure
+# Prompts for username (e.g. user@company.com) and password
+# Saved to ~/.openknow/credentials.json (mode 600)
+```
+
+Alternatively, set environment variables:
+```bash
+export OPENKNOW_USERNAME="user@company.com"
+export OPENKNOW_PASSWORD="your_password"
 ```
 
 ### `openknow workspace`
-Manage knowledge workspaces.
-
 ```bash
 openknow workspace create <name> [--description TEXT]
 openknow workspace list
@@ -143,11 +128,11 @@ openknow scan <workspace> [--filter PATTERN]
 ```
 
 ### `openknow sync`
-Download all files from a workspace's links to local storage.
+Download all files from a workspace's links. After downloading, indexes them with opencode (if installed).
 
 ```bash
-openknow sync <workspace> [--filter PATTERN] [--output-dir PATH]
-# Example: openknow sync research --filter "*.docx" --output-dir ~/Documents/research
+openknow sync <workspace> [--filter PATTERN] [--output-dir PATH] [--no-index]
+# Example: openknow sync research --filter "*.docx"
 ```
 
 ### `openknow files`
@@ -157,18 +142,38 @@ List all locally downloaded files for a workspace.
 openknow files <workspace>
 ```
 
+### `openknow ui`
+Launch the chat web UI for asking questions about downloaded knowledge.
+
+```bash
+openknow ui [--host HOST] [--port PORT] [--workspace WORKSPACE]
+# Default: http://127.0.0.1:5000
+```
+
+---
+
+## opencode Integration
+
+After syncing, openknow automatically calls:
+```bash
+opencode add <file> --context <workspace>
+```
+for each downloaded file, making it queryable through opencode's AI. When the chat UI receives a question, it:
+
+1. Searches the downloaded text files for relevant excerpts (keyword scoring)
+2. Builds a context string from the most relevant content
+3. Calls `opencode ask <question>` with the context for AI-powered answers
+4. Falls back to showing raw excerpts if opencode is not installed
+
 ---
 
 ## Authentication
 
-openknow uses the **device code flow** (MSAL) for authentication:
+### OneDrive shared links
+Public share links (shared with "anyone with the link") are downloaded directly — no authentication needed. Private links require the configured Microsoft 365 credentials.
 
-1. On first run, you will see a code like `Enter the code ABC123 at https://microsoft.com/devicelogin`
-2. Open the URL in any browser and enter the code
-3. Sign in with your Microsoft account
-4. Tokens are cached in `~/.openknow/token_cache.json` (file permissions set to 600)
-
-Subsequent runs will use the cached token silently until it expires.
+### SharePoint sites
+Authenticates using your Microsoft 365 username and password via the `Office365-REST-Python-Client` library. No Azure AD app registration required.
 
 ---
 
@@ -176,7 +181,7 @@ Subsequent runs will use the cached token silently until it expires.
 
 Downloaded files are saved to `~/openknow_files/<workspace>/<link-label>/` by default.
 
-Override with the `OPENKNOW_DOWNLOAD_DIR` environment variable or `--output-dir` flag.
+Override with the `OPENKNOW_DOWNLOAD_DIR` environment variable or the `--output-dir` flag.
 
 ---
 
@@ -184,10 +189,10 @@ Override with the `OPENKNOW_DOWNLOAD_DIR` environment variable or `--output-dir`
 
 | Variable | Description | Default |
 |---|---|---|
-| `OPENKNOW_CONFIG_DIR` | Directory for config and token cache | `~/.openknow` |
+| `OPENKNOW_CONFIG_DIR` | Directory for config, credentials, and database | `~/.openknow` |
 | `OPENKNOW_DOWNLOAD_DIR` | Base directory for downloaded files | `~/openknow_files` |
-| `OPENKNOW_CLIENT_ID` | Azure AD client ID (overrides config file) | – |
-| `OPENKNOW_TENANT_ID` | Azure AD tenant ID | `common` |
+| `OPENKNOW_USERNAME` | Microsoft 365 username (overrides credentials file) | – |
+| `OPENKNOW_PASSWORD` | Microsoft 365 password (overrides credentials file) | – |
 
 ---
 
@@ -198,24 +203,28 @@ openknow/
 ├── openknow/
 │   ├── __init__.py       # Package version
 │   ├── cli.py            # Click CLI entry point
-│   ├── config.py         # Configuration and paths
-│   ├── workspace.py      # SQLite-based workspace/link/file memory
-│   ├── graph_client.py   # Microsoft Graph API client (MSAL auth)
-│   └── downloader.py     # File download and sync logic
+│   ├── config.py         # Configuration, paths, credential storage
+│   ├── workspace.py      # SQLite-backed workspace/link/file memory
+│   ├── graph_client.py   # OneDrive (requests) + SharePoint (Office365) clients
+│   ├── downloader.py     # File sync, path-traversal protection, opencode indexing
+│   └── webapp.py         # Flask chat web UI
+├── openknow/templates/
+│   └── index.html        # Chat UI template
 └── tests/
     ├── test_workspace.py
     ├── test_graph_client.py
     ├── test_downloader.py
-    └── test_cli.py
+    ├── test_cli.py
+    └── test_webapp.py
 ```
 
 ### Local Memory (SQLite)
 
-The agent maintains local memory in `~/.openknow/openknow.db`:
+Stored in `~/.openknow/openknow.db`:
 
 - **workspaces** – named knowledge spaces with descriptions
 - **workspace_links** – 1-5 OneDrive/SharePoint URLs per workspace
-- **file_cache** – record of synced files with local paths and timestamps
+- **file_cache** – record of synced files, keyed per `(link_id, remote_path)` so two links with the same filename don't overwrite each other
 
 ---
 

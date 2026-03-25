@@ -1,10 +1,11 @@
 """CLI entry point for OpenKnow agent.
 
 Provides commands for managing workspaces, adding OneDrive/SharePoint links,
-scanning remote folders, and downloading files to local storage.
+scanning remote folders, downloading files to local storage, and launching
+the chat web UI.
 
 Usage:
-    openknow configure               Set up Azure AD credentials
+    openknow configure               Store Microsoft 365 credentials
     openknow workspace create NAME   Create a new workspace
     openknow workspace list          List all workspaces
     openknow workspace delete NAME   Delete a workspace
@@ -14,6 +15,7 @@ Usage:
     openknow scan NAME               Scan files in all workspace links
     openknow sync NAME               Download files from all workspace links
     openknow files NAME              List locally downloaded files for a workspace
+    openknow ui                      Launch the web chat UI
 """
 
 import sys
@@ -23,8 +25,8 @@ from typing import Optional
 import click
 
 from . import __version__
-from .config import get_config_dir, get_download_dir, save_auth_config
-from .graph_client import AuthError, GraphClient, GraphError
+from .config import get_config_dir, get_download_dir, save_credentials
+from .graph_client import AuthError, GraphError
 from .workspace import (
     WorkspaceError,
     add_link,
@@ -44,11 +46,6 @@ def _ensure_db() -> None:
     init_db()
 
 
-def _make_client() -> GraphClient:
-    """Create a configured GraphClient."""
-    return GraphClient()
-
-
 def _format_size(size: int) -> str:
     """Format byte size to human-readable string."""
     for unit in ["B", "KB", "MB", "GB"]:
@@ -64,7 +61,8 @@ def cli() -> None:
     """OpenKnow - Local agent for accessing OneDrive and SharePoint knowledge.
 
     This tool lets you manage workspaces, add OneDrive/SharePoint share links,
-    scan remote folders, and download files to your local machine.
+    download files to your local machine, and ask questions about the content
+    via the built-in chat UI.
 
     Quick start:
     \b
@@ -72,6 +70,7 @@ def cli() -> None:
         openknow workspace create myproject
         openknow link add myproject https://1drv.ms/f/...
         openknow sync myproject
+        openknow ui
     """
     _ensure_db()
 
@@ -81,26 +80,22 @@ def cli() -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("--client-id", prompt="Azure AD Application (client) ID", help="Azure AD app client ID.")
-@click.option(
-    "--tenant-id",
-    default="common",
-    show_default=True,
-    help="Azure AD tenant ID or 'common' for personal/work accounts.",
-)
-def configure(client_id: str, tenant_id: str) -> None:
-    """Configure Azure AD credentials for Microsoft Graph API access.
+@click.option("--username", prompt="Microsoft 365 username (e.g. user@company.com)",
+              help="Microsoft 365 username.")
+@click.option("--password", prompt=True, hide_input=True,
+              help="Microsoft 365 account password.")
+def configure(username: str, password: str) -> None:
+    """Store Microsoft 365 credentials for SharePoint and OneDrive access.
 
     \b
-    Steps to get your client_id:
-    1. Go to https://portal.azure.com -> Azure Active Directory -> App registrations
-    2. Click 'New registration', choose 'Public client/native' redirect URI
-    3. Under 'API permissions', add:
-       - Microsoft Graph: Files.Read, Files.Read.All, Sites.Read.All
-    4. Copy the 'Application (client) ID' and use it here.
+    Credentials are saved to ~/.openknow/credentials.json (permissions 600).
+    No Azure AD app registration is required.
+
+    You can also set credentials via environment variables:
+      OPENKNOW_USERNAME and OPENKNOW_PASSWORD
     """
-    save_auth_config(client_id=client_id, tenant_id=tenant_id)
-    click.echo(f"Configuration saved to {get_config_dir() / 'auth.json'}")
+    save_credentials(username=username, password=password)
+    click.echo(f"Credentials saved to {get_config_dir() / 'credentials.json'}")
     click.echo("Run 'openknow workspace create <name>' to get started.")
 
 
@@ -231,9 +226,10 @@ def link_remove(workspace_name: str, link_id: int) -> None:
 def scan(workspace_name: str, file_filter: Optional[str]) -> None:
     """Scan and list all remote files in WORKSPACE_NAME without downloading.
 
-    Requires authentication with Microsoft. You will be prompted to sign in
-    via device code flow on the first run.
+    Requires credentials configured via 'openknow configure'.
     """
+    from .graph_client import OneDriveClient, SharePointClient
+
     try:
         links = list_links(workspace_name)
     except WorkspaceError as exc:
@@ -244,17 +240,24 @@ def scan(workspace_name: str, file_filter: Optional[str]) -> None:
         click.echo(f"No links in workspace '{workspace_name}'.")
         return
 
-    client = _make_client()
     total_files = 0
 
     for lnk in links:
         url = lnk["url"]
         label = lnk.get("label") or url
+        link_type = lnk.get("link_type", "unknown")
         click.echo(f"\nScanning: {label}")
         click.echo(f"  URL: {url}")
 
         try:
-            files = client.scan_share_url(url)
+            if link_type == "sharepoint":
+                client = SharePointClient()
+                from .downloader import _parse_sharepoint_url
+                site_url, folder_relative_url = _parse_sharepoint_url(url)
+                files = client.list_folder_files(site_url, folder_relative_url)
+            else:
+                client = OneDriveClient()
+                files = client.list_folder_items(url)
         except (AuthError, GraphError) as exc:
             click.echo(f"  Error: {exc}", err=True)
             continue
@@ -266,8 +269,8 @@ def scan(workspace_name: str, file_filter: Optional[str]) -> None:
 
         click.echo(f"  Found {len(filtered)} file(s){' (filtered)' if file_filter else ''}:")
         for file_info in filtered:
-            size_str = _format_size(file_info["size"])
-            click.echo(f"    {file_info['path']}  [{size_str}]  {file_info.get('last_modified', '')}")
+            size_str = _format_size(int(file_info.get("size", 0)))
+            click.echo(f"    {file_info.get('path', file_info['name'])}  [{size_str}]  {file_info.get('last_modified', '')}")
         total_files += len(filtered)
 
     click.echo(f"\nTotal: {total_files} file(s)")
@@ -281,42 +284,46 @@ def scan(workspace_name: str, file_filter: Optional[str]) -> None:
 @click.argument("workspace_name")
 @click.option("--filter", "-f", "file_filter", default=None, help="Filter files by pattern (e.g. '*.pdf').")
 @click.option("--output-dir", "-o", default=None, help="Override the default download directory.")
-def sync(workspace_name: str, file_filter: Optional[str], output_dir: Optional[str]) -> None:
+@click.option("--no-index", is_flag=True, default=False, help="Skip opencode indexing after download.")
+def sync(workspace_name: str, file_filter: Optional[str], output_dir: Optional[str], no_index: bool) -> None:
     """Download all files from WORKSPACE_NAME links to local storage.
 
-    Files are saved under the download directory in a folder named after
-    the workspace. The download location is shown after syncing.
+    After downloading, files are indexed with opencode so they can be
+    searched and queried via the chat UI. Use --no-index to skip this step.
     """
     download_dir = Path(output_dir) if output_dir else get_download_dir()
-    client = _make_client()
 
     click.echo(f"Syncing workspace '{workspace_name}' to {download_dir / workspace_name} ...")
 
     def _progress(filename: str, done: int, total: int) -> None:
         if total > 0:
             pct = int(done / total * 100)
-            click.echo(f"  Downloading {filename}: {pct}%", nl=False)
-            click.echo("\r", nl=False)
+            click.echo(f"  {filename}: {pct}%  \r", nl=False)
         else:
-            click.echo(f"  Downloading {filename}...", nl=False)
-            click.echo("\r", nl=False)
+            click.echo(f"  Downloading {filename}...  \r", nl=False)
 
     try:
         results = sync_workspace(
             workspace_name=workspace_name,
-            client=client,
             download_dir=download_dir,
             file_filter=file_filter,
             progress_callback=_progress,
+            opencode_index=not no_index,
         )
     except (AuthError, WorkspaceError) as exc:
         click.echo(f"Error: {exc}", err=True)
         sys.exit(1)
 
     ok = [r for r in results if r["status"] == "ok"]
+    warnings = [r for r in results if r["status"] == "warning"]
     errors = [r for r in results if r["status"] == "error"]
 
     click.echo(f"\nSync complete: {len(ok)} file(s) downloaded, {len(errors)} error(s).")
+
+    if warnings:
+        click.echo("\nWarnings:")
+        for w in warnings:
+            click.echo(f"  {w['error']}")
 
     if errors:
         click.echo("\nErrors:")
@@ -325,6 +332,7 @@ def sync(workspace_name: str, file_filter: Optional[str], output_dir: Optional[s
 
     if ok:
         click.echo(f"\nFiles saved to: {download_dir / workspace_name}")
+        click.echo("Run 'openknow ui' to ask questions about the downloaded files.")
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +359,35 @@ def files(workspace_name: str) -> None:
     for entry in cached:
         size_str = _format_size(entry["file_size"])
         click.echo(f"{entry['remote_path']:<40}  {size_str:>8}  {entry['synced_at']}")
+
+
+# ---------------------------------------------------------------------------
+# UI command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="Host to bind the web UI.")
+@click.option("--port", default=5000, show_default=True, help="Port for the web UI.")
+@click.option("--workspace", "-w", default=None, help="Pre-select a workspace in the UI.")
+def ui(host: str, port: int, workspace: Optional[str]) -> None:
+    """Launch the OpenKnow chat web UI.
+
+    Opens a local web server with a ChatGPT-style interface for asking
+    questions about the downloaded knowledge base.
+
+    \b
+    After starting, open your browser at http://127.0.0.1:5000
+    """
+    try:
+        from .webapp import create_app
+    except ImportError as exc:
+        click.echo(f"Cannot start web UI: {exc}", err=True)
+        sys.exit(1)
+
+    app = create_app(default_workspace=workspace)
+    click.echo(f"Starting OpenKnow chat UI at http://{host}:{port}")
+    click.echo("Press Ctrl+C to stop.")
+    app.run(host=host, port=port, debug=False)
 
 
 def _match_filter_cli(filename: str, pattern: str) -> bool:

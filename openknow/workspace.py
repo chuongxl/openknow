@@ -70,7 +70,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 file_size INTEGER DEFAULT 0,
                 last_modified TEXT,
                 synced_at TEXT NOT NULL,
-                UNIQUE(workspace_id, remote_path)
+                UNIQUE(link_id, remote_path)
             );
             """
         )
@@ -304,7 +304,7 @@ def record_file_sync(
             """
             INSERT INTO file_cache (workspace_id, link_id, remote_path, local_path, file_size, last_modified, synced_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(workspace_id, remote_path) DO UPDATE SET
+            ON CONFLICT(link_id, remote_path) DO UPDATE SET
                 local_path = excluded.local_path,
                 file_size = excluded.file_size,
                 last_modified = excluded.last_modified,

@@ -219,3 +219,14 @@ class TestRecordFileSync:
         assert len(cached) == 1
         assert cached[0]["local_path"] == "/tmp/v2.pdf"
         assert cached[0]["file_size"] == 200
+
+    def test_two_links_same_remote_path_separate_entries(self, db):
+        """Two different links in the same workspace with the same remote_path
+        should create two separate cache entries (not overwrite each other)."""
+        create_workspace("proj", db_path=db)
+        link_id1 = add_link("proj", "https://1drv.ms/f/abc", db_path=db)
+        link_id2 = add_link("proj", "https://company.sharepoint.com/sites/s", db_path=db)
+        record_file_sync("proj", link_id1, "docs/readme.pdf", "/tmp/link1/readme.pdf", 100, db_path=db)
+        record_file_sync("proj", link_id2, "docs/readme.pdf", "/tmp/link2/readme.pdf", 200, db_path=db)
+        cached = list_cached_files("proj", db)
+        assert len(cached) == 2
