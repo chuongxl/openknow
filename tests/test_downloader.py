@@ -12,6 +12,8 @@ from openknow.downloader import (
     _match_filter,
     _safe_dirname,
     _sanitize_remote_path,
+    _sync_folder_link,
+    _sync_url_link,
     download_file,
     index_with_opencode,
     sync_workspace,
@@ -228,6 +230,7 @@ class TestSyncWorkspace:
         with (
             patch("openknow.downloader.OneDriveClient") as MockClient,
             patch("openknow.downloader.download_file") as mock_dl,
+            patch("openknow.downloader.is_plugin_installed", return_value=True),
         ):
             MockClient.return_value.list_folder_items.return_value = [file_info]
             mock_dl.return_value = tmp_path / "proj" / "doc.pdf"
@@ -253,6 +256,7 @@ class TestSyncWorkspace:
         with (
             patch("openknow.downloader.OneDriveClient") as MockClient,
             patch("openknow.downloader.download_file") as mock_dl,
+            patch("openknow.downloader.is_plugin_installed", return_value=True),
         ):
             MockClient.return_value.list_folder_items.return_value = files
             mock_dl.return_value = tmp_path / "doc.pdf"
@@ -271,7 +275,8 @@ class TestSyncWorkspace:
         create_workspace("proj", db_path=db)
         add_link("proj", "https://1drv.ms/f/abc", db_path=db)
 
-        with patch("openknow.downloader.OneDriveClient") as MockClient:
+        with patch("openknow.downloader.OneDriveClient") as MockClient, \
+             patch("openknow.downloader.is_plugin_installed", return_value=True):
             MockClient.return_value.list_folder_items.side_effect = Exception("Network error")
             # Falls back to treating the URL as a direct file link
             with patch("openknow.downloader.download_file") as mock_dl:
@@ -283,3 +288,220 @@ class TestSyncWorkspace:
                     opencode_index=False,
                 )
         assert any(r["status"] == "error" for r in results)
+
+    def test_plugin_not_installed_returns_error(self, db, tmp_path):
+        create_workspace("proj", db_path=db)
+        add_link("proj", "https://1drv.ms/f/abc", db_path=db)
+
+        with patch("openknow.downloader.is_plugin_installed", return_value=False):
+            results = sync_workspace(
+                workspace_name="proj",
+                download_dir=tmp_path,
+                db_path=db,
+                opencode_index=False,
+            )
+        assert len(results) == 1
+        assert results[0]["status"] == "error"
+        assert "plugin" in results[0]["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# _sync_folder_link
+# ---------------------------------------------------------------------------
+
+class TestSyncFolderLink:
+    def test_copies_files_from_local_folder(self, db, tmp_path):
+        # Create a source folder with some files
+        src = tmp_path / "source"
+        src.mkdir()
+        (src / "report.pdf").write_bytes(b"PDF")
+        (src / "notes.txt").write_bytes(b"notes")
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", str(src), db_path=db)
+        link_dir = tmp_path / "dest"
+
+        results = _sync_folder_link(
+            url=str(src),
+            link_id=link_id,
+            link_dir=link_dir,
+            workspace_name="proj",
+            file_filter=None,
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert len(results) == 2
+        assert all(r["status"] == "ok" for r in results)
+        names = {r["file"] for r in results}
+        assert "report.pdf" in names
+        assert "notes.txt" in names
+
+    def test_applies_file_filter(self, db, tmp_path):
+        src = tmp_path / "source"
+        src.mkdir()
+        (src / "doc.pdf").write_bytes(b"PDF")
+        (src / "image.png").write_bytes(b"PNG")
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", str(src), db_path=db)
+        link_dir = tmp_path / "dest"
+
+        results = _sync_folder_link(
+            url=str(src),
+            link_id=link_id,
+            link_dir=link_dir,
+            workspace_name="proj",
+            file_filter="*.pdf",
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert len(results) == 1
+        assert results[0]["file"] == "doc.pdf"
+
+    def test_recurses_into_subdirectories(self, db, tmp_path):
+        src = tmp_path / "source"
+        (src / "sub").mkdir(parents=True)
+        (src / "sub" / "nested.txt").write_bytes(b"nested")
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", str(src), db_path=db)
+        link_dir = tmp_path / "dest"
+
+        results = _sync_folder_link(
+            url=str(src),
+            link_id=link_id,
+            link_dir=link_dir,
+            workspace_name="proj",
+            file_filter=None,
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert len(results) == 1
+        assert "nested.txt" in results[0]["file"]
+
+    def test_returns_error_for_nonexistent_folder(self, db, tmp_path):
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", str(tmp_path), db_path=db)
+
+        results = _sync_folder_link(
+            url="/nonexistent/path/that/does/not/exist",
+            link_id=link_id,
+            link_dir=tmp_path / "dest",
+            workspace_name="proj",
+            file_filter=None,
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert len(results) == 1
+        assert results[0]["status"] == "error"
+
+    def test_sync_workspace_routes_folder_link(self, db, tmp_path):
+        src = tmp_path / "source"
+        src.mkdir()
+        (src / "file.txt").write_bytes(b"hello")
+
+        create_workspace("proj", db_path=db)
+        add_link("proj", str(src), db_path=db)
+
+        results = sync_workspace(
+            workspace_name="proj",
+            download_dir=tmp_path / "downloads",
+            db_path=db,
+            opencode_index=False,
+        )
+        assert len(results) == 1
+        assert results[0]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _sync_url_link
+# ---------------------------------------------------------------------------
+
+class TestSyncUrlLink:
+    @responses_lib.activate
+    def test_downloads_file_from_url(self, db, tmp_path):
+        url = "https://files.example.com/report.pdf"
+        responses_lib.add(responses_lib.GET, url, body=b"PDF content", status=200)
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", url, db_path=db)
+        link_dir = tmp_path / "dest"
+        downloaded = []
+
+        results = _sync_url_link(
+            url=url,
+            link_id=link_id,
+            link_dir=link_dir,
+            workspace_name="proj",
+            file_filter=None,
+            progress_callback=None,
+            downloaded_paths=downloaded,
+            db_path=db,
+        )
+        assert len(results) == 1
+        assert results[0]["status"] == "ok"
+        assert results[0]["file"] == "report.pdf"
+        assert len(downloaded) == 1
+
+    @responses_lib.activate
+    def test_applies_file_filter(self, db, tmp_path):
+        url = "https://files.example.com/image.png"
+        responses_lib.add(responses_lib.GET, url, body=b"PNG", status=200)
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", url, db_path=db)
+        link_dir = tmp_path / "dest"
+
+        results = _sync_url_link(
+            url=url,
+            link_id=link_id,
+            link_dir=link_dir,
+            workspace_name="proj",
+            file_filter="*.pdf",
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert results == []
+
+    @responses_lib.activate
+    def test_returns_error_on_http_failure(self, db, tmp_path):
+        url = "https://files.example.com/missing.pdf"
+        responses_lib.add(responses_lib.GET, url, status=404)
+
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", url, db_path=db)
+
+        results = _sync_url_link(
+            url=url,
+            link_id=link_id,
+            link_dir=tmp_path / "dest",
+            workspace_name="proj",
+            file_filter=None,
+            progress_callback=None,
+            downloaded_paths=[],
+            db_path=db,
+        )
+        assert len(results) == 1
+        assert results[0]["status"] == "error"
+
+    @responses_lib.activate
+    def test_sync_workspace_routes_url_link(self, db, tmp_path):
+        url = "https://files.example.com/data.csv"
+        responses_lib.add(responses_lib.GET, url, body=b"a,b,c", status=200)
+
+        create_workspace("proj", db_path=db)
+        add_link("proj", url, db_path=db)
+
+        results = sync_workspace(
+            workspace_name="proj",
+            download_dir=tmp_path,
+            db_path=db,
+            opencode_index=False,
+        )
+        assert len(results) == 1
+        assert results[0]["status"] == "ok"

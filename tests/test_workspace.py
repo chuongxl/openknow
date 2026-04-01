@@ -9,6 +9,7 @@ import pytest
 from openknow.workspace import (
     MAX_LINKS_PER_WORKSPACE,
     WorkspaceError,
+    _detect_link_type,
     add_link,
     create_workspace,
     delete_workspace,
@@ -128,11 +129,28 @@ class TestAddLink:
         links = list_links("proj", db)
         assert links[0]["link_type"] == "sharepoint"
 
-    def test_detects_unknown_type(self, db):
+    def test_detects_generic_url_type(self, db):
         create_workspace("proj", db_path=db)
         add_link("proj", "https://example.com/file", db_path=db)
         links = list_links("proj", db)
-        assert links[0]["link_type"] == "unknown"
+        assert links[0]["link_type"] == "url"
+
+    def test_adds_local_folder_link(self, db, tmp_path):
+        create_workspace("proj", db_path=db)
+        link_id = add_link("proj", str(tmp_path), db_path=db)
+        assert link_id > 0
+
+    def test_detects_folder_type_absolute_path(self, db, tmp_path):
+        create_workspace("proj", db_path=db)
+        add_link("proj", str(tmp_path), db_path=db)
+        links = list_links("proj", db)
+        assert links[0]["link_type"] == "folder"
+
+    def test_detects_folder_type_home_relative(self, db):
+        create_workspace("proj", db_path=db)
+        add_link("proj", "~/Documents", db_path=db)
+        links = list_links("proj", db)
+        assert links[0]["link_type"] == "folder"
 
     def test_raises_on_duplicate_url(self, db):
         create_workspace("proj", db_path=db)
@@ -230,3 +248,102 @@ class TestRecordFileSync:
         record_file_sync("proj", link_id2, "docs/readme.pdf", "/tmp/link2/readme.pdf", 200, db_path=db)
         cached = list_cached_files("proj", db)
         assert len(cached) == 2
+
+
+# ---------------------------------------------------------------------------
+# _detect_link_type
+# ---------------------------------------------------------------------------
+
+class TestDetectLinkType:
+    def test_absolute_unix_path_is_folder(self):
+        assert _detect_link_type("/home/user/docs") == "folder"
+
+    def test_tilde_path_is_folder(self):
+        assert _detect_link_type("~/Documents") == "folder"
+
+    def test_relative_path_is_folder(self):
+        assert _detect_link_type("./reports") == "folder"
+
+    def test_parent_relative_path_is_folder(self):
+        assert _detect_link_type("../shared") == "folder"
+
+    def test_file_scheme_is_folder(self):
+        assert _detect_link_type("file:///home/user/docs") == "folder"
+
+    def test_onedrive_short_url(self):
+        assert _detect_link_type("https://1drv.ms/f/abc") == "onedrive"
+
+    def test_onedrive_live_url(self):
+        assert _detect_link_type("https://onedrive.live.com/redir?x=1") == "onedrive"
+
+    def test_onedrive_com_url(self):
+        assert _detect_link_type("https://onedrive.com/file") == "onedrive"
+
+    def test_sharepoint_url(self):
+        assert _detect_link_type("https://company.sharepoint.com/sites/test") == "sharepoint"
+
+    def test_generic_https_url(self):
+        assert _detect_link_type("https://example.com/report.pdf") == "url"
+
+    def test_generic_http_url(self):
+        assert _detect_link_type("http://files.example.com/doc.zip") == "url"
+
+    def test_spoofed_sharepoint_is_generic_url(self):
+        # 'evilsharepoint.com' is NOT a SharePoint domain; it should be generic URL
+        assert _detect_link_type("https://evilsharepoint.com/file") == "url"
+
+    def test_spoofed_onedrive_is_generic_url(self):
+        assert _detect_link_type("https://evil1drv.ms/file") == "url"
+
+
+# ---------------------------------------------------------------------------
+# DB migration (legacy schema upgrade)
+# ---------------------------------------------------------------------------
+
+class TestInitDbMigration:
+    def test_migrates_old_schema_to_support_folder_and_url(self, tmp_path):
+        """Databases created with the old schema (no 'folder'/'url' types) are
+        automatically upgraded when init_db is called again."""
+        db_path = tmp_path / "legacy.db"
+        # Simulate the old schema
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE workspace_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                url TEXT NOT NULL,
+                label TEXT DEFAULT '',
+                link_type TEXT NOT NULL CHECK(link_type IN ('onedrive', 'sharepoint', 'unknown')),
+                added_at TEXT NOT NULL,
+                UNIQUE(workspace_id, url)
+            );
+            CREATE TABLE file_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                link_id INTEGER NOT NULL REFERENCES workspace_links(id) ON DELETE CASCADE,
+                remote_path TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                last_modified TEXT,
+                synced_at TEXT NOT NULL,
+                UNIQUE(link_id, remote_path)
+            );
+        """)
+        conn.close()
+
+        # Running init_db should migrate the schema
+        init_db(db_path)
+
+        # After migration, inserting a 'folder' type should succeed
+        create_workspace("proj", db_path=db_path)
+        link_id = add_link("proj", "/home/user/docs", db_path=db_path)
+        assert link_id > 0
+        links = list_links("proj", db_path)
+        assert links[0]["link_type"] == "folder"

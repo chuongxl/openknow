@@ -1,6 +1,316 @@
 # openknow
 
-A local agent that automatically accesses knowledge via OneDrive shared folders and SharePoint sites, downloads files to your machine, and provides a ChatGPT-style web UI for asking questions about the content.
+A local agent that automatically accesses knowledge from local folders, any HTTP/HTTPS URL, OneDrive shared folders, and SharePoint sites, downloads files to your machine, and provides a ChatGPT-style web UI for asking questions about the content.
+
+OneDrive and SharePoint support are available as optional **plugins** — install only what you need.
+
+---
+
+## Tech Stack Decision: OpenHands vs Microsoft Power Apps
+
+| Factor | OpenHands (Python agent) | Microsoft Power Apps / Power Automate |
+|---|---|---|
+| **Cost** | Free (open-source, no licensing) | Requires Microsoft 365 / Power Apps plan (~$5–$20/user/month) |
+| **Local execution** | Runs entirely on local computer | Cloud-first; local agent requires a gateway |
+| **opencode CLI integration** | Native Python CLI, integrates directly | Requires custom connectors or webhooks |
+| **Authentication** | Microsoft 365 username + password | Native connectors (premium connectors add cost) |
+| **Data privacy** | Files stay on local machine | Files flow through Microsoft cloud services |
+| **Setup complexity** | Minimal — just run `openknow configure` | Requires M365 admin access |
+
+**Decision: Python-based local agent (this project)**
+
+- **Zero operational cost** – no per-user licensing required
+- **Local-first** – files stay on your machine, no cloud intermediaries
+- **Native opencode integration** – automatically indexes downloaded files for AI-powered Q&A
+- **Simple auth** – uses your existing Microsoft 365 username and password
+
+---
+
+## Features
+
+- 🗂 **Workspace management** – isolated knowledge spaces with local SQLite memory
+- 📁 **Local folder support** – add any local directory as a knowledge source
+- 🔗 **Any URL** – download a file from any HTTP/HTTPS URL into a workspace
+- 🔌 **Plugin system** – OneDrive and SharePoint are optional plugins (`openknow plugins install`)
+- 📂 **Folder scanning** – list all files in a source without downloading
+- ⬇️ **File sync** – copy/download files to local storage
+- 🔍 **File filtering** – filter by pattern (e.g. `*.pdf`, `*report*`)
+- 🤖 **opencode integration** – downloaded files are automatically indexed by opencode for AI-powered answers
+- 💬 **Chat web UI** – ask questions about your knowledge base via a ChatGPT-style browser interface
+
+---
+
+## Chat UI
+
+![OpenKnow Chat UI](https://github.com/user-attachments/assets/cf119ac6-b582-45db-a66a-d394e8a2dd0d)
+
+---
+
+## Prerequisites
+
+- Python 3.9+
+- [opencode](https://opencode.ai) installed locally (optional — required for AI-powered answers)
+- A Microsoft 365 account — **only** required if you install the `sharepoint` or `onedrive` plugin
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/chuongxl/openknow.git
+cd openknow
+pip install -e .
+```
+
+---
+
+## Quick Start
+
+### Using a local folder (no plugin required)
+
+```bash
+# 1. Create a workspace
+openknow workspace create research --description "AI research papers"
+
+# 2. Add a local folder as a source
+openknow link add research ~/Documents/papers
+
+# 3. (Optional) Add any public file URL
+openknow link add research https://example.com/report.pdf
+
+# 4. Scan to see what files are available (no download)
+openknow scan research
+
+# 5. Copy/download all files
+openknow sync research
+
+# 6. Launch the chat UI and ask questions
+openknow ui
+```
+
+### Using SharePoint or OneDrive (plugin required)
+
+```bash
+# Install the plugin (prompts for Microsoft 365 credentials for SharePoint)
+openknow plugins install sharepoint
+openknow plugins install onedrive
+
+# Add links to a workspace
+openknow link add myproject https://company.sharepoint.com/sites/AITeam --label "Team Docs"
+openknow link add myproject https://1drv.ms/f/s!AbCdEfGhIjKlMnOp
+
+# Sync and query as usual
+openknow sync myproject
+openknow ui
+```
+
+---
+
+## Commands
+
+### `openknow configure`
+Store Microsoft 365 credentials for OneDrive/SharePoint access. No Azure AD app registration required.
+
+```bash
+openknow configure
+# Prompts for username (e.g. user@company.com) and password
+# Saved to ~/.openknow/credentials.json (mode 600)
+```
+
+Alternatively, set environment variables:
+```bash
+export OPENKNOW_USERNAME="user@company.com"
+export OPENKNOW_PASSWORD="your_password"
+```
+
+### `openknow plugins`
+Manage optional plugins for remote storage providers.
+
+```bash
+openknow plugins list                    # Show all plugins and their status
+openknow plugins install sharepoint      # Install SharePoint plugin (prompts for credentials)
+openknow plugins install onedrive        # Install OneDrive plugin
+openknow plugins uninstall sharepoint    # Remove a plugin
+```
+
+**Available plugins:**
+
+| Plugin | Description | Requires credentials |
+|---|---|---|
+| `sharepoint` | Microsoft SharePoint Online | Yes (M365 username/password) |
+| `onedrive` | Microsoft OneDrive (public share links) | No |
+
+### `openknow workspace`
+```bash
+openknow workspace create <name> [--description TEXT]
+openknow workspace list
+openknow workspace delete <name> [--yes]
+```
+
+### `openknow link`
+Manage sources within a workspace (1–5 per workspace).  Accepts local folder
+paths, any HTTP/HTTPS URL, OneDrive links, or SharePoint URLs.
+
+```bash
+openknow link add <workspace> <path-or-url> [--label TEXT]
+openknow link list <workspace>
+openknow link remove <workspace> <link-id>
+```
+
+**Examples:**
+```bash
+openknow link add myproject /home/user/documents          # local folder
+openknow link add myproject ~/reports                     # local folder (home-relative)
+openknow link add myproject https://example.com/doc.pdf   # any URL
+openknow link add myproject https://1drv.ms/f/s!AbCdEfGh  # OneDrive (plugin required)
+openknow link add myproject https://company.sharepoint.com/sites/...  # SharePoint (plugin required)
+```
+
+### `openknow scan`
+List all files in a workspace's sources without downloading.
+
+```bash
+openknow scan <workspace> [--filter PATTERN]
+# Example: openknow scan research --filter "*.pdf"
+```
+
+### `openknow sync`
+Download/copy all files from a workspace's sources. After downloading, indexes them with opencode (if installed).
+
+```bash
+openknow sync <workspace> [--filter PATTERN] [--output-dir PATH] [--no-index]
+# Example: openknow sync research --filter "*.docx"
+```
+
+### `openknow files`
+List all locally downloaded files for a workspace.
+
+```bash
+openknow files <workspace>
+```
+
+### `openknow ui`
+Launch the chat web UI for asking questions about downloaded knowledge.
+
+```bash
+openknow ui [--host HOST] [--port PORT] [--workspace WORKSPACE]
+# Default: http://127.0.0.1:5000
+```
+
+---
+
+## Supported Source Types
+
+| Type | Example | Plugin needed |
+|---|---|---|
+| Local folder | `/home/user/docs`, `~/reports` | None |
+| Any HTTP/HTTPS URL | `https://example.com/file.pdf` | None |
+| OneDrive share link | `https://1drv.ms/f/...` | `onedrive` |
+| SharePoint URL | `https://tenant.sharepoint.com/sites/...` | `sharepoint` |
+
+---
+
+## opencode Integration
+
+After syncing, openknow automatically calls:
+```bash
+opencode add <file> --context <workspace>
+```
+for each downloaded file, making it queryable through opencode's AI. When the chat UI receives a question, it:
+
+1. Searches the downloaded text files for relevant excerpts (keyword scoring)
+2. Builds a context string from the most relevant content
+3. Calls `opencode ask <question>` with the context for AI-powered answers
+4. Falls back to showing raw excerpts if opencode is not installed
+
+---
+
+## Authentication
+
+### Local folders and generic URLs
+No authentication required.
+
+### OneDrive shared links
+Public share links (shared with "anyone with the link") are downloaded directly — no authentication needed.  Install the `onedrive` plugin to enable support.
+
+### SharePoint sites
+Authenticates using your Microsoft 365 username and password via the `Office365-REST-Python-Client` library.  No Azure AD app registration required.  Install the `sharepoint` plugin (which prompts for credentials) to enable support.
+
+---
+
+## File Storage
+
+Downloaded files are saved to `~/openknow_files/<workspace>/<link-label>/` by default.
+
+Override with the `OPENKNOW_DOWNLOAD_DIR` environment variable or the `--output-dir` flag.
+
+---
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `OPENKNOW_CONFIG_DIR` | Directory for config, credentials, and database | `~/.openknow` |
+| `OPENKNOW_DOWNLOAD_DIR` | Base directory for downloaded files | `~/openknow_files` |
+| `OPENKNOW_USERNAME` | Microsoft 365 username (overrides credentials file) | – |
+| `OPENKNOW_PASSWORD` | Microsoft 365 password (overrides credentials file) | – |
+
+---
+
+## Architecture
+
+```
+openknow/
+├── openknow/
+│   ├── __init__.py       # Package version
+│   ├── cli.py            # Click CLI entry point
+│   ├── config.py         # Configuration, paths, credential storage
+│   ├── plugins.py        # Plugin registry and install/uninstall logic
+│   ├── workspace.py      # SQLite-backed workspace/link/file memory
+│   ├── graph_client.py   # OneDrive (requests) + SharePoint (Office365) clients
+│   ├── downloader.py     # File sync, path-traversal protection, opencode indexing
+│   └── webapp.py         # Flask chat web UI
+├── openknow/templates/
+│   └── index.html        # Chat UI template
+└── tests/
+    ├── test_workspace.py
+    ├── test_graph_client.py
+    ├── test_downloader.py
+    ├── test_cli.py
+    └── test_webapp.py
+```
+
+### Local Memory (SQLite)
+
+Stored in `~/.openknow/openknow.db`:
+
+- **workspaces** – named knowledge spaces with descriptions
+- **workspace_links** – 1-5 sources per workspace (`folder`, `url`, `onedrive`, `sharepoint`, `unknown`)
+- **file_cache** – record of synced files, keyed per `(link_id, remote_path)` so two links with the same filename don't overwrite each other
+
+### Plugin State
+
+Stored in `~/.openknow/plugins.json`:
+```json
+{
+  "installed": ["sharepoint", "onedrive"]
+}
+```
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
+```
+
+---
+
+## License
+
+MIT License – see [LICENSE](LICENSE).
 
 ---
 
