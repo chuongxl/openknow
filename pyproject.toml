@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openknow"
+version = "0.1.0"
+description = "Local agent for accessing OneDrive and SharePoint knowledge"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.9"
+dependencies = [
+    "Office365-REST-Python-Client>=2.6.2",
+    "requests>=2.32.3",
+    "click>=8.1.8",
+    "flask>=3.1.0",
+]
+
+[project.scripts]
+openknow = "openknow.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.14",
+    "responses>=0.25",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["openknow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
