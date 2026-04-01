@@ -2,6 +2,10 @@
 
 Handles downloading files from OneDrive and SharePoint to local storage
 with progress reporting, file filtering, and opencode CLI indexing.
+
+Also supports copying from local folders and downloading from any HTTP/HTTPS
+URL.  OneDrive and SharePoint require the respective plugin to be installed
+(see ``openknow plugins``).
 """
 
 import os
@@ -11,12 +15,13 @@ import sys
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import Callable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
 from .config import get_download_dir
 from .graph_client import AuthError, GraphError, OneDriveClient, SharePointClient
+from .plugins import is_plugin_installed
 from .workspace import list_links, record_file_sync
 
 
@@ -214,7 +219,29 @@ def sync_workspace(
         link_type = link.get("link_type", "unknown")
         link_dir = workspace_dir / _safe_dirname(link_label)
 
-        if link_type == "sharepoint":
+        if link_type == "folder":
+            results += _sync_folder_link(
+                url=url,
+                link_id=link_id,
+                link_dir=link_dir,
+                workspace_name=workspace_name,
+                file_filter=file_filter,
+                progress_callback=progress_callback,
+                downloaded_paths=downloaded_paths,
+                db_path=db_path,
+            )
+        elif link_type == "url":
+            results += _sync_url_link(
+                url=url,
+                link_id=link_id,
+                link_dir=link_dir,
+                workspace_name=workspace_name,
+                file_filter=file_filter,
+                progress_callback=progress_callback,
+                downloaded_paths=downloaded_paths,
+                db_path=db_path,
+            )
+        elif link_type == "sharepoint":
             results += _sync_sharepoint_link(
                 url=url,
                 link_id=link_id,
@@ -258,6 +285,19 @@ def _sync_onedrive_link(
     db_path: Optional[Path],
 ) -> List[dict]:
     """Sync a single OneDrive share link. Returns list of result dicts."""
+    if not is_plugin_installed("onedrive"):
+        return [
+            {
+                "file": url,
+                "local_path": None,
+                "status": "error",
+                "error": (
+                    "OneDrive plugin is not installed. "
+                    "Run: openknow plugins install onedrive"
+                ),
+            }
+        ]
+
     results = []
     try:
         client = OneDriveClient()
@@ -334,6 +374,19 @@ def _sync_sharepoint_link(
     db_path: Optional[Path],
 ) -> List[dict]:
     """Sync a single SharePoint link. Returns list of result dicts."""
+    if not is_plugin_installed("sharepoint"):
+        return [
+            {
+                "file": url,
+                "local_path": None,
+                "status": "error",
+                "error": (
+                    "SharePoint plugin is not installed. "
+                    "Run: openknow plugins install sharepoint"
+                ),
+            }
+        ]
+
     results = []
     try:
         client = SharePointClient()
@@ -385,6 +438,125 @@ def _sync_sharepoint_link(
             results.append({"file": remote_path, "local_path": None, "status": "error", "error": str(exc)})
 
     return results
+
+
+def _sync_folder_link(
+    url: str,
+    link_id: int,
+    link_dir: Path,
+    workspace_name: str,
+    file_filter: Optional[str],
+    progress_callback: Optional[Callable],
+    downloaded_paths: list,
+    db_path: Optional[Path],
+) -> List[dict]:
+    """Sync a local folder link by copying files to the workspace directory.
+
+    All files under *url* (recursively) that match *file_filter* are copied
+    into *link_dir*, preserving relative directory structure.
+    """
+    results: List[dict] = []
+    folder_path = Path(url).expanduser().resolve()
+
+    if not folder_path.exists() or not folder_path.is_dir():
+        return [
+            {
+                "file": url,
+                "local_path": None,
+                "status": "error",
+                "error": f"Local folder not found or is not a directory: {url}",
+            }
+        ]
+
+    for src in sorted(folder_path.rglob("*")):
+        if not src.is_file():
+            continue
+        filename = src.name
+        if file_filter and not _match_filter(filename, file_filter):
+            continue
+
+        remote_path = str(src.relative_to(folder_path))
+        try:
+            local_path = _sanitize_remote_path(remote_path, link_dir)
+        except DownloadError as exc:
+            results.append(
+                {"file": remote_path, "local_path": None, "status": "error", "error": str(exc)}
+            )
+            continue
+
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        if progress_callback:
+            progress_callback(filename, 0, src.stat().st_size)
+        try:
+            shutil.copy2(str(src), str(local_path))
+            file_size = local_path.stat().st_size
+            record_file_sync(
+                workspace_name=workspace_name,
+                link_id=link_id,
+                remote_path=remote_path,
+                local_path=str(local_path),
+                file_size=file_size,
+                db_path=db_path,
+            )
+            downloaded_paths.append(local_path)
+            if progress_callback:
+                progress_callback(filename, file_size, file_size)
+            results.append(
+                {"file": remote_path, "local_path": str(local_path), "status": "ok", "error": None}
+            )
+        except OSError as exc:
+            results.append(
+                {"file": remote_path, "local_path": None, "status": "error", "error": str(exc)}
+            )
+
+    return results
+
+
+def _sync_url_link(
+    url: str,
+    link_id: int,
+    link_dir: Path,
+    workspace_name: str,
+    file_filter: Optional[str],
+    progress_callback: Optional[Callable],
+    downloaded_paths: list,
+    db_path: Optional[Path],
+) -> List[dict]:
+    """Sync a generic HTTP/HTTPS URL by downloading the file directly.
+
+    The filename is derived from the URL path.  If a *file_filter* is
+    provided and the derived filename does not match, the file is skipped.
+    """
+    parsed = urlparse(url)
+    filename = unquote(PurePosixPath(parsed.path).name) or "download"
+
+    if file_filter and not _match_filter(filename, file_filter):
+        return []
+
+    remote_path = filename
+    try:
+        local_path = _sanitize_remote_path(remote_path, link_dir)
+    except DownloadError as exc:
+        return [{"file": remote_path, "local_path": None, "status": "error", "error": str(exc)}]
+
+    cb = _make_progress_cb(filename, progress_callback)
+    try:
+        download_file(url, local_path, cb)
+        file_size = local_path.stat().st_size if local_path.exists() else 0
+        record_file_sync(
+            workspace_name=workspace_name,
+            link_id=link_id,
+            remote_path=remote_path,
+            local_path=str(local_path),
+            file_size=file_size,
+            db_path=db_path,
+        )
+        downloaded_paths.append(local_path)
+        return [
+            {"file": remote_path, "local_path": str(local_path), "status": "ok", "error": None}
+        ]
+    except (DownloadError, OSError) as exc:
+        return [{"file": remote_path, "local_path": None, "status": "error", "error": str(exc)}]
 
 
 def _parse_sharepoint_url(url: str):

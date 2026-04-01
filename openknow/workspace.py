@@ -38,9 +38,53 @@ def _get_connection(db_path: Optional[Path] = None) -> Generator[sqlite3.Connect
         conn.close()
 
 
+def _migrate_workspace_links_if_needed(conn: sqlite3.Connection) -> None:
+    """Migrate the workspace_links table to support new link types if needed.
+
+    Versions of OpenKnow prior to the plugin system only allowed
+    ``('onedrive', 'sharepoint', 'unknown')`` as link_type values.  This
+    helper detects that old constraint and recreates the table with an
+    extended set that also includes ``'folder'`` and ``'url'``.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='workspace_links'"
+    ).fetchone()
+
+    if row is None:
+        # Table doesn't exist yet — will be created fresh below.
+        return
+
+    create_sql = row[0] or ""
+    if "'folder'" in create_sql and "'url'" in create_sql:
+        # Already up-to-date — nothing to do.
+        return
+
+    # Recreate table with an extended CHECK constraint.
+    conn.executescript(
+        """
+        CREATE TABLE workspace_links_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            url TEXT NOT NULL,
+            label TEXT DEFAULT '',
+            link_type TEXT NOT NULL CHECK(link_type IN ('onedrive', 'sharepoint', 'folder', 'url', 'unknown')),
+            added_at TEXT NOT NULL,
+            UNIQUE(workspace_id, url)
+        );
+        INSERT INTO workspace_links_new SELECT * FROM workspace_links;
+        DROP TABLE workspace_links;
+        ALTER TABLE workspace_links_new RENAME TO workspace_links;
+        """
+    )
+
+
 def init_db(db_path: Optional[Path] = None) -> None:
-    """Initialize the database schema."""
+    """Initialize the database schema, running any necessary migrations."""
     with _get_connection(db_path) as conn:
+        # Run migration before creating tables so the correct schema is used
+        # when upgrading an existing database.
+        _migrate_workspace_links_if_needed(conn)
+
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS workspaces (
@@ -56,7 +100,7 @@ def init_db(db_path: Optional[Path] = None) -> None:
                 workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 url TEXT NOT NULL,
                 label TEXT DEFAULT '',
-                link_type TEXT NOT NULL CHECK(link_type IN ('onedrive', 'sharepoint', 'unknown')),
+                link_type TEXT NOT NULL CHECK(link_type IN ('onedrive', 'sharepoint', 'folder', 'url', 'unknown')),
                 added_at TEXT NOT NULL,
                 UNIQUE(workspace_id, url)
             );
@@ -77,12 +121,34 @@ def init_db(db_path: Optional[Path] = None) -> None:
 
 
 def _detect_link_type(url: str) -> str:
-    """Detect whether a URL is a OneDrive or SharePoint link."""
+    """Detect whether a URL is a local folder, OneDrive, SharePoint, generic URL, or unknown.
+
+    Detection rules (first match wins):
+
+    1. Paths that start with ``/``, ``~``, ``./``, ``../`` are local folders.
+    2. Windows drive-letter paths (``C:\\`` / ``C:/``) are local folders.
+    3. ``file://`` URLs are local folders.
+    4. ``*.sharepoint.com`` hosts are SharePoint links.
+    5. ``1drv.ms``, ``onedrive.live.com``, ``onedrive.com`` hosts are OneDrive links.
+    6. Any other ``http://`` or ``https://`` URL is a generic ``url`` link.
+    7. Everything else is ``unknown``.
+    """
+    # --- Local path heuristics ---
+    if url.startswith(("/", "~", "./", "../")):
+        return "folder"
+    # Windows drive letter e.g. C:\ or C:/.
+    if len(url) >= 3 and url[1] == ":" and url[2] in ("/", "\\"):
+        return "folder"
+
     try:
         parsed = urlparse(url)
-        # Strip port number if present so we only compare the hostname
-        host = parsed.hostname or ""
-        host = host.lower()
+        scheme = parsed.scheme.lower()
+
+        if scheme == "file":
+            return "folder"
+
+        host = (parsed.hostname or "").lower()
+
         if host == "sharepoint.com" or host.endswith(".sharepoint.com"):
             return "sharepoint"
         if (
@@ -94,6 +160,8 @@ def _detect_link_type(url: str) -> str:
             or host.endswith(".onedrive.com")
         ):
             return "onedrive"
+        if scheme in ("http", "https"):
+            return "url"
     except Exception:
         pass
     return "unknown"

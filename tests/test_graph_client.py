@@ -32,14 +32,14 @@ class TestDetectLinkType:
         assert _detect_link_type("https://onedrive.com/file") == "onedrive"
 
     def test_unknown_url(self):
-        assert _detect_link_type("https://example.com/file") == "unknown"
+        assert _detect_link_type("https://example.com/file") == "url"
 
     def test_spoofed_sharepoint_rejected(self):
         # 'evilsharepoint.com' must NOT be detected as sharepoint
-        assert _detect_link_type("https://evilsharepoint.com/file") == "unknown"
+        assert _detect_link_type("https://evilsharepoint.com/file") == "url"
 
     def test_spoofed_onedrive_rejected(self):
-        assert _detect_link_type("https://evil1drv.ms/file") == "unknown"
+        assert _detect_link_type("https://evil1drv.ms/file") == "url"
 
 
 # ---------------------------------------------------------------------------
